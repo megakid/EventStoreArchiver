@@ -36,7 +36,11 @@ namespace DeadLinkCleaner
 
             Console.WriteLine($"Lowest persistent subscription checkpoint on {stream} is {minCheckpoint}.");
 
-            var firstNonDeadLink = await FindFirstNonDeadLink(stream, minCheckpoint);
+            var currentTruncateBefore = (await GetTruncateBefore(stream)) ?? 0L;
+
+            Console.WriteLine($"{stream} currently $tb = {currentTruncateBefore}.");
+
+            var firstNonDeadLink = await FindFirstNonDeadLink(stream, currentTruncateBefore, minCheckpoint);
 
             Console.WriteLine($"First non-dead link on {stream} is {firstNonDeadLink}.");
 
@@ -49,6 +53,21 @@ namespace DeadLinkCleaner
             await SetTruncateBefore(stream, truncateBefore);
 
             return truncateBefore;
+        }
+
+        private async Task<long?> GetTruncateBefore(string stream)
+        {
+            var getMetadataReq = new RestRequest($"streams/{stream}/metadata", Method.GET);
+            var getMetadataResponse = await _restClient.ExecuteGetTaskAsync<dynamic>(getMetadataReq);
+            var metadata = getMetadataResponse.Data;
+
+            var dict = (IDictionary<string, object>) metadata;
+            if (dict.TryGetValue("$tb", out var output))
+            {
+                return Convert.ToInt64(output);
+            }
+
+            return null;
         }
 
         private async Task SetTruncateBefore(string stream, long? truncateBefore)
@@ -75,9 +94,9 @@ namespace DeadLinkCleaner
                 throw setMetadataResponse.ErrorException;
         }
 
-        private async Task<long> FindFirstNonDeadLink(string stream, long upToInclusive)
+        private async Task<long> FindFirstNonDeadLink(string stream, long startAt, long upToInclusive)
         {
-            IEnumerable<long> GetRange(long start, int count)
+            IEnumerable<long> GetRange(long start, long count)
             {
                 for (long i = start; i < start + count; i++)
                 {
@@ -90,7 +109,7 @@ namespace DeadLinkCleaner
 
             const int ConcurrentCalls = 100;
 
-            long v = 0;
+            long v = startAt;
             do
             {
                 var tasks = GetRange(v, ConcurrentCalls)
@@ -102,7 +121,11 @@ namespace DeadLinkCleaner
 
                 var responses = await Task.WhenAll(tasks);
 
-                var firstLiveLink = responses.Where(t => t.response.StatusCode == HttpStatusCode.OK).Select(t => (long?)t.i).FirstOrDefault();
+                var firstLiveLink = responses
+                    .Where(t => t.response.StatusCode == HttpStatusCode.OK)
+                    .Select(t => (long?)t.i)
+                    .FirstOrDefault();
+
                 if (firstLiveLink.HasValue)
                     return firstLiveLink.Value;
 
