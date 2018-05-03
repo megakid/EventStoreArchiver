@@ -2,12 +2,155 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
+using System.Text;
 using System.Threading.Tasks;
+using EventStore.ClientAPI;
+using Newtonsoft.Json;
 using RestSharp;
 using RestSharp.Authenticators;
 
 namespace DeadLinkCleaner
 {
+
+    abstract class CheckpointUser
+    {
+        public string Name { get; protected set; }
+
+        public abstract string CheckpointStream { get; }
+        
+        class PersistentSubscription : CheckpointUser
+        {
+            public override string CheckpointStream => $"$persistentsubscription-{{0}}::{Name}-checkpoint";
+
+            public PersistentSubscription(string persistentSubscriptionName)
+            {
+                Name = persistentSubscriptionName;
+            }
+
+            public async Task<long?> GetCheckpointOnStream(IEventStoreConnection eventStoreConnection, string stream)
+            {
+                var checkpointStream = string.Format(CheckpointStream, stream);
+
+                var headEvent = await eventStoreConnection.ReadEventAsync(checkpointStream, StreamPosition.End, false);
+                
+                if (headEvent.Status != EventReadStatus.Success)
+                    // Safer to return zero -
+                    // it is assumed that this PS is relevant on the stream given
+                    // so in that case a checkpoint hasn't been written yet.
+                    return 0;
+
+                var resolvedEvent = headEvent.Event.Value;
+                
+                return long.Parse(Encoding.UTF8.GetString(resolvedEvent.Event.Data));
+
+            }
+        }
+
+        class Projection : CheckpointUser
+        {
+            public override string CheckpointStream => $"$projections-{Name}-checkpoint";
+
+            class ByCategory : Projection
+            {
+                public ByCategory()
+                {
+                    Name = "$by_category";
+                }
+            }
+            
+            class ByEventType : Projection
+            {
+                public ByEventType()
+                {
+                    Name = "$by_event_type";
+                }
+            }
+            
+            class StreamByCategory : Projection
+            {
+                public StreamByCategory()
+                {
+                    Name = "$stream_by_category";
+                }
+            }
+            
+            class Streams : Projection
+            {
+                public Streams()
+                {
+                    Name = "$streams";
+                }
+            }
+
+            public async Task<long?> GetCheckpoint(IEventStoreConnection eventStoreConnection)
+            {
+                var checkpointStream = $"{Name}-checkpoint";
+                var checkpointEvent = await eventStoreConnection.ReadEventAsync(checkpointStream, StreamPosition.End, true);
+
+                if (checkpointEvent.Status == EventReadStatus.Success)
+                {
+                }
+                return 0;
+            }
+
+        }
+        
+        
+        class CustomProjection : CheckpointUser
+        {
+            public override string CheckpointStream => $"$projections-{Name}-checkpoint";
+
+            public CustomProjection(string projectionName)
+            {
+                Name = projectionName;
+            }
+
+            public async Task<long?> GetCheckpointOnStream(IEventStoreConnection eventStoreConnection, string stream)
+            {
+                var checkpointEvent = await eventStoreConnection.ReadEventAsync(CheckpointStream, StreamPosition.End, false);
+
+                if (checkpointEvent.Status != EventReadStatus.Success)
+                {
+                    // Here we assume if the projection hasn't written any checkpoints for this stream, 
+                    // then the stream isn't relevant to the projection 
+                    return null;
+                }
+                
+                return checkpointEvent.Event?.Event.Metadata
+            }
+
+        }
+    }
+
+    public class PersistentSubscriptionCheckpointData
+    {
+        public long Checkpoint { get; set; }
+    }
+
+    public class CustomProjectionCheckpointMetadata
+    {
+        [JsonProperty("$v")]
+        public string V { get; set; }
+        
+        [JsonProperty("$s")]
+        public IDictionary<string, long> StreamCheckpoints { get; set; }
+    }
+    
+    public class SystemProjectionCheckpointMetadata
+    {
+        [JsonProperty("$v")]
+        public string V { get; set; }
+
+        [JsonProperty("$c")]
+        public long C { get; set; }
+
+        [JsonProperty("$p")]
+        public long P { get; set; }
+    }
+    
+    
+
+    
     public class EventStoreHttpDeadLinkCleanup
     {
         private readonly RestClient _restClient;
