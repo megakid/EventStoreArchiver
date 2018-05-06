@@ -1,23 +1,28 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Linq;
 using System.Net;
+using System.Net.Sockets;
+using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
+using DeadLinkCleaner.EventStore;
 using EventStore.ClientAPI;
+using EventStore.ClientAPI.Common.Log;
+using EventStore.ClientAPI.Projections;
 using Newtonsoft.Json;
 using RestSharp;
 using RestSharp.Authenticators;
 
 namespace DeadLinkCleaner
 {
-
     abstract class CheckpointUser
     {
         public string Name { get; protected set; }
 
         public abstract string CheckpointStream { get; }
-        
+
         class PersistentSubscription : CheckpointUser
         {
             public override string CheckpointStream => $"$persistentsubscription-{{0}}::{Name}-checkpoint";
@@ -32,7 +37,7 @@ namespace DeadLinkCleaner
                 var checkpointStream = string.Format(CheckpointStream, stream);
 
                 var headEvent = await eventStoreConnection.ReadEventAsync(checkpointStream, StreamPosition.End, false);
-                
+
                 if (headEvent.Status != EventReadStatus.Success)
                     // Safer to return zero -
                     // it is assumed that this PS is relevant on the stream given
@@ -40,9 +45,8 @@ namespace DeadLinkCleaner
                     return 0;
 
                 var resolvedEvent = headEvent.Event.Value;
-                
-                return long.Parse(Encoding.UTF8.GetString(resolvedEvent.Event.Data));
 
+                return long.Parse(Encoding.UTF8.GetString(resolvedEvent.Event.Data));
             }
         }
 
@@ -57,7 +61,7 @@ namespace DeadLinkCleaner
                     Name = "$by_category";
                 }
             }
-            
+
             class ByEventType : Projection
             {
                 public ByEventType()
@@ -65,7 +69,7 @@ namespace DeadLinkCleaner
                     Name = "$by_event_type";
                 }
             }
-            
+
             class StreamByCategory : Projection
             {
                 public StreamByCategory()
@@ -73,7 +77,7 @@ namespace DeadLinkCleaner
                     Name = "$stream_by_category";
                 }
             }
-            
+
             class Streams : Projection
             {
                 public Streams()
@@ -85,17 +89,18 @@ namespace DeadLinkCleaner
             public async Task<long?> GetCheckpoint(IEventStoreConnection eventStoreConnection)
             {
                 var checkpointStream = $"{Name}-checkpoint";
-                var checkpointEvent = await eventStoreConnection.ReadEventAsync(checkpointStream, StreamPosition.End, true);
+                var checkpointEvent =
+                    await eventStoreConnection.ReadEventAsync(checkpointStream, StreamPosition.End, true);
 
                 if (checkpointEvent.Status == EventReadStatus.Success)
                 {
                 }
+
                 return 0;
             }
-
         }
-        
-        
+
+
         class CustomProjection : CheckpointUser
         {
             public override string CheckpointStream => $"$projections-{Name}-checkpoint";
@@ -107,7 +112,8 @@ namespace DeadLinkCleaner
 
             public async Task<long?> GetCheckpointOnStream(IEventStoreConnection eventStoreConnection, string stream)
             {
-                var checkpointEvent = await eventStoreConnection.ReadEventAsync(CheckpointStream, StreamPosition.End, false);
+                var checkpointEvent =
+                    await eventStoreConnection.ReadEventAsync(CheckpointStream, StreamPosition.End, false);
 
                 if (checkpointEvent.Status != EventReadStatus.Success)
                 {
@@ -115,10 +121,9 @@ namespace DeadLinkCleaner
                     // then the stream isn't relevant to the projection 
                     return null;
                 }
-                
+
                 return checkpointEvent.Event?.Event.Metadata
             }
-
         }
     }
 
@@ -129,48 +134,131 @@ namespace DeadLinkCleaner
 
     public class CustomProjectionCheckpointMetadata
     {
-        [JsonProperty("$v")]
-        public string V { get; set; }
-        
-        [JsonProperty("$s")]
-        public IDictionary<string, long> StreamCheckpoints { get; set; }
+        [JsonProperty("$v")] public string V { get; set; }
+
+        [JsonProperty("$s")] public IDictionary<string, long> StreamCheckpoints { get; set; }
     }
-    
+
     public class SystemProjectionCheckpointMetadata
     {
-        [JsonProperty("$v")]
-        public string V { get; set; }
+        [JsonProperty("$v")] public string V { get; set; }
 
-        [JsonProperty("$c")]
-        public long C { get; set; }
+        [JsonProperty("$c")] public long C { get; set; }
 
-        [JsonProperty("$p")]
-        public long P { get; set; }
+        [JsonProperty("$p")] public long P { get; set; }
     }
-    
-    
 
-    
-    public class EventStoreHttpDeadLinkCleanup
+    public class TestPrepper : EventStoreUser
     {
-        private readonly RestClient _restClient;
-
-        public EventStoreHttpDeadLinkCleanup(string baseUrl, string username, string password)
+        public TestPrepper(string connectionString) 
+            : base(connectionString)
         {
-            _restClient =
-                new RestClient(baseUrl) { Authenticator = new HttpBasicAuthenticator(username, password) };
         }
+
+        public async Task Prep(string streamCategory, int streamId)
+        {
+            dynamic GetData() => Enumerable.Range(0, 5)
+                .ToDictionary(j => $"Property{j}", j => (object) Guid.NewGuid());
+
+
+            var events = 25000;
+            
+            var inserts = Enumerable.Range(0, events)
+                .Batch(1000)
+                .Select(batch =>
+                    batch.Select(_ => new {eventId = Guid.NewGuid(), eventType = "MyType", data = GetData()}).ToArray())
+                .Select()
+                .ToArray();
+            
+            var es = await EventStore;
+
+            var stream = $"{streamCategory}-{streamId}";
+            es.AppendToStreamAsync(stream, ExpectedVersion.Any, )
+        }
+    }
+
+
+    public abstract class EventStoreUser
+    {
+        protected AsyncLazy<IEventStoreConnection> EventStore { get; }
+        protected AsyncLazy<IProjectionsManager> ProjectionsManager { get; }
+
+        public EventStoreUser(string connectionString)
+        {
+            EventStore = new AsyncLazy<IEventStoreConnection>(() => EventStoreConnection.Create(connectionString));
+            ProjectionsManager = new AsyncLazy<IProjectionsManager>(() => EventStoreProjectionsManager.Create(connectionString));
+        }
+    }
+
+    public class EventStoreHttpDeadLinkCleanup : EventStoreUser
+    {
+        public EventStoreHttpDeadLinkCleanup(string connectionString)
+            : base(connectionString)
+        {
+        }
+        
+        private async Task<long> FindFirstNonDeadLink2(string stream, long startAtInclusive)
+        {
+            IEnumerable<long> GetRange(long start, long count)
+            {
+                for (long i = start; i < start + count; i++)
+                {
+                    yield return i;
+                }
+            }
+
+            const int ConcurrentCalls = 100;
+
+            var esc = await _es;
+
+            var slice = await esc.ReadStreamEventsForwardAsync(stream, startAtInclusive, 500, true);
+
+            
+            foreach (var re in slice.Events)
+            {
+                
+            }
+            
+            long v = startAtInclusive;
+            do
+            {
+                var tasks = GetRange(v, ConcurrentCalls)
+                    .Select(async i =>
+                    {
+                        var response =
+                            await _restClient.ExecuteGetTaskAsync<dynamic>(new RestRequest($"streams/{stream}/{i}"));
+                        return (i, response);
+                    });
+
+                var responses = await Task.WhenAll(tasks);
+
+                var firstLiveLink = responses
+                    .Where(t => t.response.StatusCode == HttpStatusCode.OK)
+                    .Select(t => (long?) t.i)
+                    .FirstOrDefault();
+
+                if (firstLiveLink.HasValue)
+                    return firstLiveLink.Value;
+
+                v += ConcurrentCalls;
+
+                if (v > upToInclusive)
+                    return upToInclusive;
+            } while (true);
+        }
+
+        
 
         public async Task<long?> SafelyTruncateStream(string stream)
         {
-
             var pss = (await GetPersistentSubscriptions())
                 .Where(ps => ps.Stream == stream)
                 .ToArray();
 
             if (pss.Length > 0 && pss.Any(ps => !ps.Checkpoint.HasValue))
             {
-                Console.WriteLine("One or more PersistentSubscriptions without a checkpoint location. Not truncating...");
+                Console.WriteLine(
+                    "One or more PersistentSubscriptions without a checkpoint location. Not truncating...");
                 return 0;
             }
 
@@ -187,9 +275,9 @@ namespace DeadLinkCleaner
 
             Console.WriteLine($"First non-dead link on {stream} is {firstNonDeadLink}.");
 
-            var safeVersionToTruncateBefore = new[] { minCheckpoint, firstNonDeadLink }.Min();
+            var safeVersionToTruncateBefore = new[] {minCheckpoint, firstNonDeadLink}.Min();
 
-            var truncateBefore = safeVersionToTruncateBefore > 0 ? safeVersionToTruncateBefore : (long?)null;
+            var truncateBefore = safeVersionToTruncateBefore > 0 ? safeVersionToTruncateBefore : (long?) null;
 
             Console.WriteLine($"Setting stream metadata on {stream}, $tb = '{truncateBefore}'.");
 
@@ -222,7 +310,7 @@ namespace DeadLinkCleaner
             if (truncateBefore.HasValue)
                 metadata["$tb"] = truncateBefore.Value;
             else
-                ((IDictionary<string, object>)metadata).Remove("$tb");
+                ((IDictionary<string, object>) metadata).Remove("$tb");
 
             //https://groups.google.com/forum/#!topic/event-store/Y-QX6bdYYG8
             var setMetadataReq = new RestRequest($"streams/{stream}/metadata", Method.POST);
@@ -258,7 +346,8 @@ namespace DeadLinkCleaner
                 var tasks = GetRange(v, ConcurrentCalls)
                     .Select(async i =>
                     {
-                        var response = await _restClient.ExecuteGetTaskAsync<dynamic>(new RestRequest($"streams/{stream}/{i}"));
+                        var response =
+                            await _restClient.ExecuteGetTaskAsync<dynamic>(new RestRequest($"streams/{stream}/{i}"));
                         return (i, response);
                     });
 
@@ -266,7 +355,7 @@ namespace DeadLinkCleaner
 
                 var firstLiveLink = responses
                     .Where(t => t.response.StatusCode == HttpStatusCode.OK)
-                    .Select(t => (long?)t.i)
+                    .Select(t => (long?) t.i)
                     .FirstOrDefault();
 
                 if (firstLiveLink.HasValue)
@@ -276,9 +365,7 @@ namespace DeadLinkCleaner
 
                 if (v > upToInclusive)
                     return upToInclusive;
-
             } while (true);
-
         }
 
         private async Task<IReadOnlyList<PersistentSubscription>> GetPersistentSubscriptions()
@@ -292,7 +379,7 @@ namespace DeadLinkCleaner
                 string stream = sub["eventStreamId"];
                 string groupName = sub["groupName"];
                 string checkpointStreamUri =
-                    ((string)sub["parkedMessageUri"]).Replace("parked", "checkpoint") + "/head/backward/1";
+                    ((string) sub["parkedMessageUri"]).Replace("parked", "checkpoint") + "/head/backward/1";
 
                 long? checkpointLocation;
                 try
@@ -309,7 +396,8 @@ namespace DeadLinkCleaner
                     checkpointLocation = null;
                 }
 
-                Console.WriteLine($"Found PersistentSubscription on '{stream}' named '{groupName}' with checkpoint at '{checkpointLocation}'.");
+                Console.WriteLine(
+                    $"Found PersistentSubscription on '{stream}' named '{groupName}' with checkpoint at '{checkpointLocation}'.");
 
                 pss.Add(new PersistentSubscription(stream, groupName, checkpointLocation));
             }
@@ -326,11 +414,12 @@ namespace DeadLinkCleaner
         public bool FillStream(string stream, int events)
         {
             dynamic GetData() => Enumerable.Range(0, 5)
-                .ToDictionary(j => $"Property{j}", j => (object)Guid.NewGuid());
+                .ToDictionary(j => $"Property{j}", j => (object) Guid.NewGuid());
 
             var inserts = Enumerable.Range(0, events)
                 .Batch(1000)
-                .Select(batch => batch.Select(_ => new { eventId = Guid.NewGuid(), eventType = "MyType", data = GetData() }).ToArray())
+                .Select(batch =>
+                    batch.Select(_ => new {eventId = Guid.NewGuid(), eventType = "MyType", data = GetData()}).ToArray())
                 .ToArray();
 
             bool success = true;
@@ -348,7 +437,6 @@ namespace DeadLinkCleaner
             }
 
             return success;
-
         }
     }
 }
