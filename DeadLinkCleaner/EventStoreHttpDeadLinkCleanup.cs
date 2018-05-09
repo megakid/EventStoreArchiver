@@ -8,6 +8,8 @@ using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
 using DeadLinkCleaner.EventStore;
+using DeadLinkCleaner.EventStore.PersistentSubscriptions;
+using DeadLinkCleaner.EventStore.Projections;
 using EventStore.ClientAPI;
 using EventStore.ClientAPI.Common.Log;
 using EventStore.ClientAPI.Projections;
@@ -126,7 +128,6 @@ namespace DeadLinkCleaner
             }
         }
     }
-
     public class PersistentSubscriptionCheckpointData
     {
         public long Checkpoint { get; set; }
@@ -170,7 +171,7 @@ namespace DeadLinkCleaner
                 .Select()
                 .ToArray();
             
-            var es = await EventStore;
+            var es = await EventStoreConnection;
 
             var stream = $"{streamCategory}-{streamId}";
             es.AppendToStreamAsync(stream, ExpectedVersion.Any, )
@@ -180,13 +181,15 @@ namespace DeadLinkCleaner
 
     public abstract class EventStoreUser
     {
-        protected AsyncLazy<IEventStoreConnection> EventStore { get; }
+        protected AsyncLazy<IEventStoreConnection> EventStoreConnection { get; }
         protected AsyncLazy<IProjectionsManager> ProjectionsManager { get; }
+        protected AsyncLazy<IPersistentSubscriptionsManager> PersistentSubscriptionsManager { get; }
 
         public EventStoreUser(string connectionString)
         {
-            EventStore = new AsyncLazy<IEventStoreConnection>(() => EventStoreConnection.Create(connectionString));
+            EventStoreConnection = new AsyncLazy<IEventStoreConnection>(() => global::EventStore.ClientAPI.EventStoreConnection.Create(connectionString));
             ProjectionsManager = new AsyncLazy<IProjectionsManager>(() => EventStoreProjectionsManager.Create(connectionString));
+            PersistentSubscriptionsManager = new AsyncLazy<IPersistentSubscriptionsManager>(() => EventStorePersistentSubscriptionsManager.Create(connectionString));
         }
     }
 
@@ -197,57 +200,59 @@ namespace DeadLinkCleaner
         {
         }
         
-        private async Task<long> FindFirstNonDeadLink2(string stream, long startAtInclusive)
+        private async Task<long> FindFirstNonDeadLink2(string stream, long startAtInclusive = StreamPosition.Start)
         {
-            IEnumerable<long> GetRange(long start, long count)
-            {
-                for (long i = start; i < start + count; i++)
-                {
-                    yield return i;
-                }
-            }
-
-            const int ConcurrentCalls = 100;
-
-            var esc = await _es;
-
-            var slice = await esc.ReadStreamEventsForwardAsync(stream, startAtInclusive, 500, true);
-
+            var esc = await EventStoreConnection;
             
-            foreach (var re in slice.Events)
-            {
-                
-            }
             
-            long v = startAtInclusive;
-            do
-            {
-                var tasks = GetRange(v, ConcurrentCalls)
-                    .Select(async i =>
-                    {
-                        var response =
-                            await _restClient.ExecuteGetTaskAsync<dynamic>(new RestRequest($"streams/{stream}/{i}"));
-                        return (i, response);
-                    });
+            // Last dead link...
+            var x = (await GetFirstAliveLink(stream, startAtInclusive, esc)) - 1;
+            
+            // validate x
+            
+            
+            // check persistent subs
+            var psm = await PersistentSubscriptionsManager;
 
-                var responses = await Task.WhenAll(tasks);
+            var persistentSubscriptions = psm.List(stream);
+            
+            if (persistentSubscriptions)
+            
+            // check projections
+            var pm = await ProjectionsManager;
+            
+            pm.ListAllAsync()
 
-                var firstLiveLink = responses
-                    .Where(t => t.response.StatusCode == HttpStatusCode.OK)
-                    .Select(t => (long?) t.i)
-                    .FirstOrDefault();
-
-                if (firstLiveLink.HasValue)
-                    return firstLiveLink.Value;
-
-                v += ConcurrentCalls;
-
-                if (v > upToInclusive)
-                    return upToInclusive;
-            } while (true);
+            return x;
         }
 
-        
+        private static async Task<long> GetFirstAliveLink(string streamId, long startAtInclusive, IEventStoreConnection esc)
+        {
+            StreamEventsSlice currentSlice;
+
+            var nextSliceStart = startAtInclusive;
+            do
+            {
+                const int readSize = 500;
+
+                currentSlice = await esc.ReadStreamEventsForwardAsync(streamId, nextSliceStart, readSize, true);
+
+                nextSliceStart = currentSlice.NextEventNumber;
+
+                foreach (var re in currentSlice.Events)
+                {
+                    // dead link - could be a permissions issue also so need to be running as admin.
+                    if (!re.IsResolved) 
+                        continue;
+                    
+                    return re.OriginalEventNumber;
+
+                }
+            } while (!currentSlice.IsEndOfStream);
+
+            return startAtInclusive;
+        }
+
 
         public async Task<long?> SafelyTruncateStream(string stream)
         {

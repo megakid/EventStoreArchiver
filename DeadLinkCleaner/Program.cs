@@ -17,16 +17,19 @@ namespace DeadLinkCleaner
         {
             args = new string[]
             {
-                "-i", "ConnectTo=tcp://admin:changeit@localhost:1113; Http=http://admin:changeit@localhost:2113; HeartBeatTimeout=10000; ReconnectionDelay=500; MaxReconnections=-1; MaxDiscoverAttempts=2147483647; VerboseLogging=false",
+                "-c", "ConnectTo=tcp://admin:changeit@localhost:1112; Http=http://admin:changeit@localhost:1113; HeartBeatTimeout=10000; ReconnectionDelay=500; MaxReconnections=-1; MaxDiscoverAttempts=2147483647; VerboseLogging=false",
                 "-s", "$ce-AggregateCmds",
             };
 
             CommandLine.Parser.Default.ParseArguments<Options>(args)
                 .WithParsed(o =>
                 {
-                    var u = new EventStoreHttpDeadLinkCleanup(o.ConnectionString);
-                    var truncatedAt = u.SafelyTruncateStream(o.Stream).GetAwaiter().GetResult();
-                    Console.WriteLine($"{o.Stream} safely truncated at {truncatedAt}.");
+                    var u = new EventStoreTests(o.ConnectionString);
+                    
+                    u.RunAll().GetAwaiter().GetResult();
+                    
+//                    var truncatedAt = u.SafelyTruncateStream(o.Stream).GetAwaiter().GetResult();
+//                    Console.WriteLine($"{o.Stream} safely truncated at {truncatedAt}.");
                 });
 
             Console.WriteLine("Complete... press any key to exit;");

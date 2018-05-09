@@ -6,12 +6,13 @@ using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Threading.Tasks;
+using DeadLinkCleaner.EventStore.PersistentSubscriptions;
 using EventStore.ClientAPI;
 using EventStore.ClientAPI.Common.Log;
 using EventStore.ClientAPI.Projections;
 using EventStore.ClientAPI.SystemData;
 
-namespace DeadLinkCleaner.EventStore
+namespace DeadLinkCleaner.EventStore.Projections
 {
     public class EventStoreProjectionsManager : IProjectionsManager
     {

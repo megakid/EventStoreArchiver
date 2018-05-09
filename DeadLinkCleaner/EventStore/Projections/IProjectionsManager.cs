@@ -1,9 +1,10 @@
 ﻿using System.Collections.Generic;
 using System.Threading.Tasks;
+using DeadLinkCleaner.EventStore.PersistentSubscriptions;
 using EventStore.ClientAPI.Projections;
 using EventStore.ClientAPI.SystemData;
 
-namespace DeadLinkCleaner.EventStore
+namespace DeadLinkCleaner.EventStore.Projections
 {
     public interface IProjectionsManager
     {

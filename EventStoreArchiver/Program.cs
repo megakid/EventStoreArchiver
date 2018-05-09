@@ -30,29 +30,29 @@ namespace EventStoreArchiver
     public class Program
     {
         public static async Task<int> Main(string[] args)
-        {
-            // enumerate all streams
-            IEventStoreConnection conn = EventStoreConnection.Create(connection);
-
-            await Task.Run(() => conn.ConnectAsync());
-
-            try
-            {
-                await conn.CreatePersistentSubscriptionAsync(stream, group,
-                    PersistentSubscriptionSettings.Create(), null);
-            }
-            catch
-            {
-            }
-
-            dynamic ps = conn.ConnectToPersistentSubscription(stream, group,
-                (s, e) => Process(s, e),
-                (s, r, ex) => HandleException(s, r, ex),
-                null,
-                2,
-                false);
-
-            Console.ReadKey();
+//        {
+//            // enumerate all streams
+//            IEventStoreConnection conn = EventStoreConnection.Create(connection);
+//
+//            await Task.Run(() => conn.ConnectAsync());
+//
+//            try
+//            {
+//                await conn.CreatePersistentSubscriptionAsync(stream, group,
+//                    PersistentSubscriptionSettings.Create(), null);
+//            }
+//            catch
+//            {
+//            }
+//
+//            dynamic ps = conn.ConnectToPersistentSubscription(stream, group,
+//                (s, e) => Process(s, e),
+//                (s, r, ex) => HandleException(s, r, ex),
+//                null,
+//                2,
+//                false);
+//
+//            Console.ReadKey();
 
         }
     }
