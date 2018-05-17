@@ -19,7 +19,10 @@ namespace DeadLinkCleaner
             switch (this)
             {
                 case DirectCheckpoint dc when other is DirectCheckpoint odc:
-                    return dc.CompareTo(odc);
+                    return dc.CompareTo(odc);                
+                
+                case LogicalCheckpoint lc when other is LogicalCheckpoint olc:
+                    return lc.CompareTo(olc);
 
                 case NotApplicableCheckpoint nac when other is NotApplicableCheckpoint onac:
                     return 0;
@@ -160,15 +163,6 @@ namespace DeadLinkCleaner
             return Checkpoint.CompareTo(other.Checkpoint);
         }
 
-        public int CompareTo(object obj)
-        {
-            if (ReferenceEquals(null, obj)) return 1;
-            if (ReferenceEquals(this, obj)) return 0;
-            if (!(obj is DirectCheckpoint))
-                throw new ArgumentException($"Object must be of type {nameof(DirectCheckpoint)}");
-            return CompareTo((DirectCheckpoint) obj);
-        }
-
         public static bool operator <(DirectCheckpoint left, DirectCheckpoint right)
         {
             return Comparer<DirectCheckpoint>.Default.Compare(left, right) < 0;
@@ -249,37 +243,85 @@ namespace DeadLinkCleaner
                 [JsonProperty("$p")] public long? P { get; set; }
             }
             
-            
             public override async Task<Checkpoint> GetCheckpointForStream(IEventStoreConnection eventStoreConnection,
                 string stream)
             {
-                var headEvent = await eventStoreConnection.ReadEventAsync(CheckpointStream, StreamPosition.End, false);
-
-                if (headEvent.Status != EventReadStatus.Success || headEvent.Event?.OriginalEvent == null)
-                    // Safer to return zero -
-                    // it is assumed that this PS is relevant on the stream given
-                    // so in that case a checkpoint hasn't been written yet.
-                    return Checkpoint.Unknown;
-
-                var resolvedEvent = headEvent.Event?.OriginalEvent;
-
-                var metaDataJson = JObject
-                    .Parse(Encoding.UTF8.GetString(resolvedEvent.Metadata))
-                    .ToObject<ProjectionCheckpointMetadata>();
-
-//                if (metaDataJson.C.HasValue && metaDataJson.P.HasValue)
-//                    return new LogicalCheckpoint(metaDataJson.C.Value, metaDataJson.P.Value);
-
-                if (metaDataJson.StreamCheckpoints != null)
+                try
                 {
-                    if (metaDataJson.StreamCheckpoints.TryGetValue(stream, out var o))
-                        return new DirectCheckpoint(o);
+                    var headEvent =
+                        await eventStoreConnection.ReadEventAsync(CheckpointStream, StreamPosition.End, false);
 
-                    return Checkpoint.NotApplicable;
+                    if (headEvent.Status != EventReadStatus.Success || headEvent.Event?.OriginalEvent == null)
+                        // Safer to return zero -
+                        // it is assumed that this PS is relevant on the stream given
+                        // so in that case a checkpoint hasn't been written yet.
+                        return Checkpoint.Unknown;
+
+                    var resolvedEvent = headEvent.Event?.OriginalEvent;
+
+                    var metaDataJson = JObject
+                        .Parse(Encoding.UTF8.GetString(resolvedEvent.Metadata))
+                        .ToObject<ProjectionCheckpointMetadata>();
+
+                    if (metaDataJson.C.HasValue && metaDataJson.P.HasValue)
+                        return new LogicalCheckpoint(metaDataJson.C.Value, metaDataJson.P.Value);
+
+                    if (metaDataJson.StreamCheckpoints != null)
+                    {
+                        if (metaDataJson.StreamCheckpoints.TryGetValue(stream, out var o))
+                            return new DirectCheckpoint(o);
+
+                        return Checkpoint.NotApplicable;
+                    }
                 }
-                
+                catch
+                {
+                    // return Unknown
+                }
+
                 return Checkpoint.Unknown;
             }
+        }
+    }
+
+    internal class LogicalCheckpoint : Checkpoint, IComparable<LogicalCheckpoint>
+    {
+        public long CommitPosition { get; }
+        public long PreparePosition { get; }
+
+        public LogicalCheckpoint(long commitPosition, long preparePosition)
+        {
+            CommitPosition = commitPosition;
+            PreparePosition = preparePosition;
+        }
+
+        public int CompareTo(LogicalCheckpoint other)
+        {
+            if (ReferenceEquals(this, other)) return 0;
+            if (ReferenceEquals(null, other)) return 1;
+            var commitPositionComparison = CommitPosition.CompareTo(other.CommitPosition);
+            if (commitPositionComparison != 0) return commitPositionComparison;
+            return PreparePosition.CompareTo(other.PreparePosition);
+        }
+
+        public static bool operator <(LogicalCheckpoint left, LogicalCheckpoint right)
+        {
+            return Comparer<LogicalCheckpoint>.Default.Compare(left, right) < 0;
+        }
+
+        public static bool operator >(LogicalCheckpoint left, LogicalCheckpoint right)
+        {
+            return Comparer<LogicalCheckpoint>.Default.Compare(left, right) > 0;
+        }
+
+        public static bool operator <=(LogicalCheckpoint left, LogicalCheckpoint right)
+        {
+            return Comparer<LogicalCheckpoint>.Default.Compare(left, right) <= 0;
+        }
+
+        public static bool operator >=(LogicalCheckpoint left, LogicalCheckpoint right)
+        {
+            return Comparer<LogicalCheckpoint>.Default.Compare(left, right) >= 0;
         }
     }
 }

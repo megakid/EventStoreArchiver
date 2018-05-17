@@ -23,10 +23,67 @@ namespace DeadLinkCleaner
 
         public async Task RunAll()
         {
-            await Scenario1_CompleteTruncationResumesNormalActivity("X", "Y");
+            await Scenario1_CompleteTruncationResumesNormalActivity("X");
             await Scenario2_PersistentSubscriptionIsBehind("Z");
             await Scenario3_CustomProjectionIsBehind("A");
             await Scenario4_NoDeadLinks("B");
+            await Scenario5_SystemProjectionIsBehind("C");
+        }
+
+        private async Task Scenario5_SystemProjectionIsBehind(string categoryName1)
+        {
+            var projectionName = "$by_event_type";
+
+            var pm = await ProjectionsManager;
+
+            var admin = new UserCredentials("admin", "changeit");
+            
+            var stream1 = $"{categoryName1}-1";
+            var category1 = $"$ce-{categoryName1}";
+
+            var count = 10000;
+            
+            // add 10000
+            await GenerateEvents(stream1, count); // default checkpoint is 4000
+
+            // wait for projection to catch up
+            await Task.Delay(3000);
+
+            await pm.DisableAsync(projectionName, admin);
+            
+            await Task.Delay(1000);
+            
+            // add 20000
+            await GenerateEvents(stream1, 2 * count);
+            
+            await Task.Delay(1000);
+            
+            // Truncate X-1 at 20000 (out of 30000)
+            await SetTruncateBefore(stream1, (2 * count) + 1);
+            
+            await Task.Delay(1000);
+
+            // Now find safe truncate point
+            var safePoint1 = await _truncator.FindSafeTruncationBeforePoint(category1);
+            
+            if (safePoint1.HasValue)
+                throw new Exception();
+            
+            // Re-enable
+            await pm.EnableAsync(projectionName, admin);
+            
+            // add excess events to ensure system projection checkpoints are done
+            await GenerateEvents(stream1, count);
+
+            // wait for projection to catch up
+            await Task.Delay(3000);
+
+            // Now find safe truncate point
+            var safePoint2 = await _truncator.FindSafeTruncationBeforePoint(category1);
+            
+            if (!safePoint2.HasValue || safePoint2 != 2 * count) 
+                throw new Exception();
+            
         }
 
         private async Task Scenario4_NoDeadLinks(string categoryName1)
@@ -47,51 +104,38 @@ namespace DeadLinkCleaner
             
             await SetTruncateBefore(stream1, count + 1);
 
+            // add more to ensure system projections are ahead
+            await GenerateEvents(stream1, count);
             
-            await Task.Delay(3000);
+            await Task.Delay(5000);
             
             // all dead links
             var safePoint2 = await _truncator.FindSafeTruncationBeforePoint(category1);
 
-            if (!safePoint2.HasValue || safePoint2 != 10000)
+            if (!safePoint2.HasValue || safePoint2 != count + 1)
                 throw new Exception();
 
         }
 
-        public async Task Scenario1_CompleteTruncationResumesNormalActivity(string categoryName1, string categoryName2)
+        public async Task Scenario1_CompleteTruncationResumesNormalActivity(string categoryName1)
         {
             var esc = await EventStoreConnection;
 
             var stream1 = $"{categoryName1}-1";
-            var stream2 = $"{categoryName2}-1";
 
             var category1 = $"$ce-{categoryName1}";
-            var category2 = $"$ce-{categoryName2}";
 
-            var count = 10000;
+            var count = 12000;
 
-            await Task.WhenAll(
-                GenerateEvents(stream1, count),
-                GenerateEvents(stream2, count));
+            await GenerateEvents(stream1, count);
 
             await Task.Delay(5000);
 
-            var streamLength = await GetStreamLength(stream1);
-
-            if (streamLength != count)
-                throw new Exception();
-
-            await SetTruncateBefore(stream1, streamLength + 1);
-
+            await SetTruncateBefore(stream1, 4000 + 1);
 
             var safePoint1 = await _truncator.FindSafeTruncationBeforePoint(category1);
 
-            if (!safePoint1.HasValue || safePoint1 != count)
-                throw new Exception();
-
-            var safePoint2 = await _truncator.FindSafeTruncationBeforePoint(category2);
-
-            if (safePoint2.HasValue)
+            if (!safePoint1.HasValue || safePoint1 != 4000)
                 throw new Exception();
 
 
@@ -104,12 +148,17 @@ namespace DeadLinkCleaner
 
             await GenerateEvents(stream1, count);
 
-            await Task.Delay(5000);
+            await Task.Delay(1000);
 
-            streamLength = await GetStreamLength(category1);
+            await SetTruncateBefore(stream1, 8000 + 1);
+            
+            await Task.Delay(1000);
+            
+            var safePoint2 = await _truncator.FindSafeTruncationBeforePoint(category1);
 
-            if (streamLength < 20000) // 20000 events + metadata
+            if (!safePoint2.HasValue || safePoint2 != 8000)
                 throw new Exception();
+
         }
 
         public async Task Scenario2_PersistentSubscriptionIsBehind(string categoryName1)
@@ -136,12 +185,10 @@ namespace DeadLinkCleaner
 
             
             // Truncate X-1
-            var streamLength = await GetStreamLength(stream1);
-
-            if (streamLength != count)
-                throw new Exception();
-
-            await SetTruncateBefore(stream1, streamLength + 1);
+            await SetTruncateBefore(stream1, count + 1);
+            
+            // add more to ensure system projections are ahead
+            await GenerateEvents(stream1, count);
             
             await Task.Delay(5000);
 
@@ -155,13 +202,19 @@ namespace DeadLinkCleaner
 
             await SetTruncateBefore(category1, safePoint1.Value + 1);
 
-            await Task.Delay(5000);
+            await Task.Delay(1000);
             
 //            Console.WriteLine("Restart ES now...Press key when done");
 //            Console.ReadKey();
             
+            // read the rest
             await SubscribeAndRead(category1, "Scenario2", count - persistentSubscriptionReads); // 7500
 
+            await Task.Delay(1000);
+            
+            // add more to ensure system projections are ahead
+            await GenerateEvents(stream1, count);
+            
             await Task.Delay(5000);
             
             // Now find safe truncate point
@@ -198,7 +251,7 @@ namespace DeadLinkCleaner
                     }})
             ", admin);
 
-            await Task.Delay(5000);
+            await Task.Delay(1000);
             
             await pm.DisableAsync(name, admin);
             
@@ -223,7 +276,7 @@ namespace DeadLinkCleaner
             await pm.EnableAsync(name, admin);
             
             // wait for projection to catch up
-            await Task.Delay(5000);
+            await Task.Delay(3000);
 
             // Now find safe truncate point
             var safePoint2 = await _truncator.FindSafeTruncationBeforePoint(category1);
@@ -293,19 +346,6 @@ namespace DeadLinkCleaner
             await esc.SetStreamMetadataAsync(stream, ExpectedVersion.Any, edittedStreamMetadata);
         }
 
-        private async Task<long> GetStreamLength(string stream)
-        {
-            var esc = await EventStoreConnection;
-
-            var read = await esc.ReadStreamEventsBackwardAsync(stream, StreamPosition.End, 1, true);
-
-            if (read.Status == SliceReadStatus.Success)
-            {
-                return read.LastEventNumber + 1;
-            }
-
-            return -1;
-        }
 
         private async Task GenerateEvents(string stream, int count)
         {

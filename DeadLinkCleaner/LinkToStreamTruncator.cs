@@ -1,13 +1,16 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Reactive.Disposables;
 using System.Reactive.Linq;
+using System.Text;
 using System.Threading.Tasks;
 using DeadLinkCleaner.EventStore.PersistentSubscriptions;
 using DeadLinkCleaner.EventStore.PersistentSubscriptions.Internals;
 using DeadLinkCleaner.EventStore.Projections;
 using EventStore.ClientAPI;
 using EventStore.ClientAPI.Projections;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
 namespace DeadLinkCleaner
@@ -35,26 +38,10 @@ namespace DeadLinkCleaner
             //
             // check persistent subs
             //
-            var psm = await PersistentSubscriptionsManager;
+            var checkpoint = await GetPersistentSubscriptionsCheckpoint(stream);
 
-            var persistentSubscriptions = await psm.List(stream);
-
-            // Start with checkpoint not applicable...
-            Checkpoint minDirectCheckpoint = Checkpoint.NotApplicable;
-
-            foreach (var psd in persistentSubscriptions)
-            {
-                var checkpoint = await GetPersistentSubscriptionCheckpoint(stream, psd, esc);
-
-                if (checkpoint == Checkpoint.Unknown)
-                    return null;
-
-                if (checkpoint == Checkpoint.NotApplicable)
-                    continue;
-
-                minDirectCheckpoint = new[] {minDirectCheckpoint, checkpoint}.Min();
-            }
-
+            if (checkpoint == Checkpoint.Unknown)
+                return null;
 
             //
             // check projections
@@ -64,30 +51,15 @@ namespace DeadLinkCleaner
             //
             // User continuous projections first...
             //
-            var projections = await pm.ListContinuousAsync();
-
-            foreach (var pd in projections.Where(pd => !pd.Name.StartsWith("$")))
-            {
-                var relevent = await IsProjectionRelevent(stream, pd, pm);
-
-                if (!relevent)
-                    continue;
-
-                var checkpoint = await GetCustomProjectionCheckpoint(stream, pd, esc);
-
-                if (checkpoint == Checkpoint.Unknown)
-                    return null;
-
-                if (checkpoint == Checkpoint.NotApplicable)
-                    continue;
-
-                minDirectCheckpoint = new[] {minDirectCheckpoint, checkpoint}.Min();
-            }
-
-            var endAtExclusive = minDirectCheckpoint == Checkpoint.NotApplicable
+            checkpoint = await GetUserProjectionsCheckpoint(stream, checkpoint);
+            
+            if (checkpoint == Checkpoint.Unknown)
+                return null;
+            
+            var endAtExclusive = checkpoint == Checkpoint.NotApplicable
                 ? StreamPosition.End
-                : ((DirectCheckpoint) minDirectCheckpoint).Checkpoint;
-
+                : ((DirectCheckpoint) checkpoint).Checkpoint;
+            
             //
             // Last dead link...
             //
@@ -112,12 +84,121 @@ namespace DeadLinkCleaner
                 return null;
 
             var linkEvent = linkEvents.Events[0];
-
+            
             // Should always be deletable.
             if (!IsDeletable(linkEvent))
                 return null;
+            
+            //
+            // Now system projections ...
+            //
+            var linkData = linkEvent.Link;
+            
+            var linkMetadata = JObject
+                .Parse(Encoding.UTF8.GetString(linkData.Metadata))
+                .ToObject<LinkMetadata>();
 
+            if (!await AreSystemProjectionsPastTruncationPoint(linkMetadata.PreparePosition, linkMetadata.CommitPosition)) 
+                return null;
+            
             return candidateEventNumber;
+        }
+
+        private async Task<bool> AreSystemProjectionsPastTruncationPoint(long prepare, long commit)
+        {
+            var esc = await EventStoreConnection;
+            
+            var pm = await ProjectionsManager;
+            
+            var projections = await pm.ListContinuousAsync();
+
+            foreach (var pd in projections)
+            {
+                var checkpoint = await GetProjectionCheckpoint(null, pd, esc);
+
+                // since this iterates all projections, ignore those that aren't logically checkpointed.
+                if (!(checkpoint is LogicalCheckpoint logicalCheckpoint)) 
+                    continue;
+                
+                if (checkpoint == Checkpoint.Unknown)
+                    return false;
+                
+                if (logicalCheckpoint.PreparePosition < prepare || logicalCheckpoint.CommitPosition < commit)
+                    return false;
+            }
+
+            return true;
+        }
+
+        private async Task<Checkpoint> GetProjectionCheckpoint(string stream,
+            ProjectionDetails projectionDetails, IEventStoreConnection esc)
+        {
+            var n = new CheckpointUser.Projection(projectionDetails.Name);
+
+            return await n.GetCheckpointForStream(esc, stream);
+        }
+
+
+        public class LinkMetadata
+        {
+            [JsonProperty("$v")] public string V { get; set; }
+                
+            [JsonProperty("$c")] public long CommitPosition { get; set; }
+
+            [JsonProperty("$p")] public long PreparePosition { get; set; }
+            
+            [JsonProperty("$o")] public string OriginStream { get; set; }
+            
+            [JsonProperty("$causedBy")] public Guid CausedBy { get; set; }
+        }
+
+        
+        private async Task<Checkpoint> GetUserProjectionsCheckpoint(string stream, Checkpoint minDirectCheckpoint)
+        {
+            var esc = await EventStoreConnection;
+            
+            var pm = await ProjectionsManager;
+            
+            var projections = await pm.ListContinuousAsync();
+
+            foreach (var pd in projections)
+            {
+                // skip system projections
+                if (pd.Name.StartsWith("$"))
+                    continue;
+                
+                var relevent = await IsProjectionRelevent(stream, pd, pm);
+
+                if (!relevent)
+                    continue;
+
+                var checkpoint = await GetProjectionCheckpoint(stream, pd, esc);
+
+                minDirectCheckpoint = new[] {minDirectCheckpoint, checkpoint}.Min();
+            }
+
+            return minDirectCheckpoint;
+        }
+
+        private async Task<Checkpoint> GetPersistentSubscriptionsCheckpoint(string stream)
+        {
+            var esc = await EventStoreConnection;
+            
+            var psm = await PersistentSubscriptionsManager;
+
+            var persistentSubscriptions = await psm.List(stream);
+
+            // Start with checkpoint not applicable...
+            var minDirectCheckpoint = Checkpoint.NotApplicable;
+
+            foreach (var psd in persistentSubscriptions)
+            {
+                var checkpoint = await GetPersistentSubscriptionsCheckpoint(stream, psd, esc);
+
+                minDirectCheckpoint = new[] {minDirectCheckpoint, checkpoint}.Min();
+            }
+
+            return minDirectCheckpoint;
         }
 
         private static async Task<bool> IsProjectionRelevent(string stream, ProjectionDetails pd,
@@ -125,21 +206,14 @@ namespace DeadLinkCleaner
         {
             var query = await pm.GetQueryAsync(pd.Name);
 
+            // $ce-X or $et-X => X
             if (stream.StartsWith("$"))
                 stream = stream.Substring(stream.IndexOf("-", StringComparison.Ordinal) + 1);
 
             return query.Contains(stream);
         }
 
-        private static async Task<Checkpoint> GetCustomProjectionCheckpoint(
-            string stream, ProjectionDetails projectionDetails, IEventStoreConnection esc)
-        {
-            var n = new CheckpointUser.Projection(projectionDetails.Name);
-
-            return await n.GetCheckpointForStream(esc, stream);
-        }
-
-        private static async Task<Checkpoint> GetPersistentSubscriptionCheckpoint(
+        private static async Task<Checkpoint> GetPersistentSubscriptionsCheckpoint(
             string stream,
             PersistentSubscriptionDetails persistentSubscriptionDetails,
             IEventStoreConnection esc)

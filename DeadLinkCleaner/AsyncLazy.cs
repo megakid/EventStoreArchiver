@@ -4,14 +4,14 @@ using System.Threading.Tasks;
 
 namespace DeadLinkCleaner
 {
-    public class AsyncLazy<T> : Lazy<Task<T>>
+    public class AsyncLazy<T> : Lazy<ValueTask<T>>
     {
         public AsyncLazy(Func<T> valueFactory) :
-            base(() => Task.Factory.StartNew(valueFactory)) { }
+            base(() => new ValueTask<T>(valueFactory())) { }
 
-        public AsyncLazy(Func<Task<T>> taskFactory) :
-            base(taskFactory) { }
+        public AsyncLazy(Func<Task<T>> valueFactory) :
+            base(() => new ValueTask<T>(valueFactory())) { }
 
-        public TaskAwaiter<T> GetAwaiter() { return Value.GetAwaiter(); }
+        public ValueTaskAwaiter<T> GetAwaiter() { return Value.GetAwaiter(); }
     }
 }
