@@ -141,7 +141,7 @@ namespace DeadLinkCleaner
 
             await SetTruncateBefore(category1, safePoint1.Value + 1);
 
-//            Console.WriteLine("Restart ES now...Press key when done");
+//            Log.Information("Restart ES now...Press key when done");
 //            Console.ReadKey();
 
             await Task.Delay(1000);
@@ -204,7 +204,7 @@ namespace DeadLinkCleaner
 
             await Task.Delay(1000);
             
-//            Console.WriteLine("Restart ES now...Press key when done");
+//            Log.Information("Restart ES now...Press key when done");
 //            Console.ReadKey();
             
             // read the rest

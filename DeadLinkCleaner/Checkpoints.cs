@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using EventStore.ClientAPI;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using Serilog;
 
 namespace DeadLinkCleaner
 {
@@ -108,6 +109,11 @@ namespace DeadLinkCleaner
         {
             return !Equals(left, right);
         }
+
+        public override string ToString()
+        {
+            return $"[Not Applicable]";
+        }
     }
 
     class UnknownCheckpoint : Checkpoint, IEquatable<UnknownCheckpoint>
@@ -144,6 +150,10 @@ namespace DeadLinkCleaner
         public static bool operator !=(UnknownCheckpoint left, UnknownCheckpoint right)
         {
             return !Equals(left, right);
+        }
+        public override string ToString()
+        {
+            return $"[Unknown]";
         }
     }
 
@@ -182,6 +192,12 @@ namespace DeadLinkCleaner
         {
             return Comparer<DirectCheckpoint>.Default.Compare(left, right) >= 0;
         }
+        
+        
+        public override string ToString()
+        {
+            return $"[Direct {Checkpoint}]";
+        }
     }
 
     abstract class CheckpointUser
@@ -210,10 +226,13 @@ namespace DeadLinkCleaner
                 var headEvent = await eventStoreConnection.ReadEventAsync(checkpointStream, StreamPosition.End, false);
 
                 if (headEvent.Status != EventReadStatus.Success || headEvent.Event?.OriginalEvent == null)
+                {
+                    Log.Information("Could not load checkpoint event for {checkpointStream}.", checkpointStream);
                     // Safer to return zero -
                     // it is assumed that this PS is relevant on the stream given
                     // so in that case a checkpoint hasn't been written yet.
                     return Checkpoint.Unknown;
+                }
 
                 var resolvedEvent = headEvent.Event.Value;
 
@@ -252,10 +271,14 @@ namespace DeadLinkCleaner
                         await eventStoreConnection.ReadEventAsync(CheckpointStream, StreamPosition.End, false);
 
                     if (headEvent.Status != EventReadStatus.Success || headEvent.Event?.OriginalEvent == null)
+                    {
+                        Log.Warning("Could not load checkpoint event for {checkpointStream}.", CheckpointStream);
+
                         // Safer to return zero -
                         // it is assumed that this PS is relevant on the stream given
                         // so in that case a checkpoint hasn't been written yet.
                         return Checkpoint.Unknown;
+                    }
 
                     var resolvedEvent = headEvent.Event?.OriginalEvent;
 
@@ -274,8 +297,9 @@ namespace DeadLinkCleaner
                         return Checkpoint.NotApplicable;
                     }
                 }
-                catch
+                catch (Exception ex)
                 {
+                    Log.Error(ex, "Error loading checkpoint for {checkpointStream}", CheckpointStream);
                     // return Unknown
                 }
 
@@ -322,6 +346,10 @@ namespace DeadLinkCleaner
         public static bool operator >=(LogicalCheckpoint left, LogicalCheckpoint right)
         {
             return Comparer<LogicalCheckpoint>.Default.Compare(left, right) >= 0;
+        }
+        public override string ToString()
+        {
+            return $"[Position {PreparePosition}/{CommitPosition}]";
         }
     }
 }
